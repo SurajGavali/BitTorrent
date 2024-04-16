@@ -1,20 +1,13 @@
 package com.suraj.controller;
 
 import com.dampcake.bencode.Bencode;
-import com.dampcake.bencode.BencodeInputStream;
 import com.dampcake.bencode.Type;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.multipart.MultipartFile;
-
-import java.io.ByteArrayInputStream;
-import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.Map;
 
 @org.springframework.web.bind.annotation.RestController
