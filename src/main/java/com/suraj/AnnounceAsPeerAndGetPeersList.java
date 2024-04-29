@@ -1,6 +1,10 @@
 package com.suraj;
 import com.dampcake.bencode.Bencode;
 import com.dampcake.bencode.Type;
+import com.suraj.model.DecodedData;
+import com.suraj.model.FileInfo;
+import com.suraj.model.SockAddr;
+import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -11,11 +15,11 @@ import java.io.UnsupportedEncodingException;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.time.Duration;
+import java.util.*;
 import java.net.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,115 +27,165 @@ import java.util.regex.Pattern;
 @Service
 public class AnnounceAsPeerAndGetPeersList {
 
-    RestTemplate restTemplate = new RestTemplate();
+    RestTemplate restTemplate = new RestTemplateBuilder().setReadTimeout(Duration.ofMillis(10000)).build();
     Bencode bencode = new Bencode();
 
-    public Object getPeers(Map<String, Object> decodedData) throws UnsupportedEncodingException, NoSuchAlgorithmException {
+    Map<Integer,SockAddr> dictSockAddr = new HashMap<>();
+    int MAX_PEERS_CONNECTED = 8;
+    int MAX_PEERS_TRY_CONNECT = 30;
 
-        try {
+    public Object getPeers(DecodedData decodedData) throws UnsupportedEncodingException, NoSuchAlgorithmException, InterruptedException {
 
-            List<String> announceUrlList = new ArrayList<>();
+        List<String> announceUrlList = new ArrayList<>();
+        int pieceLength = decodedData.getInfo().getPieceLength();
+        String pieces = decodedData.getInfo().getPieces();
+        byte[] rawInfoHash = bencode.encode(decodedData.getInfo().toString());
 
-            announceUrlList.add(decodedData.get("announce").toString());
+        MessageDigest digest = MessageDigest.getInstance("SHA-1");
+        digest.update(rawInfoHash);
 
-            if (decodedData.get("announce-list") != null) {
-                List<List<String>> announceList = (List<List<String>>) decodedData.get("announce-list");
-                for (List<String> urlList : announceList) {
-                    for (String url : urlList) {
-                        announceUrlList.add(url);
-                    }
+        byte[] infoHash = digest.digest();
+        String peerId = generatePeerId();
+        String root = decodedData.getInfo().getName();
+        announceUrlList.add(decodedData.getAnnounce());
+        if (decodedData.getAnnounceList() != null && !decodedData.getAnnounceList().isEmpty()) {
+            List<List<String>> announceList = decodedData.getAnnounceList();
+            for (List<String> urlList : announceList) {
+                for (String url : urlList) {
+                    announceUrlList.add(url);
                 }
             }
+        }
 
-            //System.out.println("announceURL :: " + announceUrlList);
+        int totalLength = decodedData.getInfo().getLength();
+        List<FileInfo> fileNames = new ArrayList<>();
+        FileInfo fileInfo = new FileInfo();
+        fileInfo.setPath(decodedData.getInfo().getName());
+        fileInfo.setLength(decodedData.getInfo().getLength());
 
-            for (String trackerUrl : announceUrlList) {
+        fileNames.add(fileInfo);
+
+        long numPieces = (long) Math.ceil((double) totalLength / pieceLength);
 
 
+
+        for (String trackerUrl : announceUrlList) {
+
+
+            try {
                 if (trackerUrl.startsWith("http")) {
-                    getDataFromhttp(decodedData,trackerUrl);
+                    getDataFromhttp(decodedData, trackerUrl);
                 }
-
                 if (trackerUrl.startsWith("udp")) {
-                    getDataFromUdp(trackerUrl,decodedData);
+                    getDataFromUdp(trackerUrl, infoHash,peerId);
                 }
+            } catch (Exception e) {
+                System.out.println(e);
+//                e.printStackTrace();
+                continue;
             }
-        } catch (Exception e) {
-
         }
         return null;
     }
 
-    public void getDataFromhttp(Map<String, Object> decodedData, String trackerUrl) throws UnsupportedEncodingException, NoSuchAlgorithmException {
+    public void getDataFromhttp(DecodedData decodedData, String trackerUrl) throws UnsupportedEncodingException, NoSuchAlgorithmException {
 
 
 
         int port = getPortFromUrl(trackerUrl);
-        String peerId = "TR2940-k8hj0wgej6ch";
+        String peerId = generatePeerId();
 
         String infoHash = createInfoHash(decodedData);
 
         String finalUrl = trackerUrl + "?info_hash=" + infoHash +
                 "&peer_id=" + peerId +
-                "&port=" + port +
+                "&port=" + "6881" +
                 "&uploaded=0" +
                 "&downloaded=0" +
                 "&left=0" +
                 "&compact=1";
         System.out.println(finalUrl);
 
-        ResponseEntity<String> dataFromAnnounceUrl = restTemplate.getForEntity(finalUrl, String.class);
-        System.out.println(dataFromAnnounceUrl);
+        try {
+            URL url = new URL(trackerUrl);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
 
-        if (dataFromAnnounceUrl.getStatusCode().equals(HttpStatus.OK)) {
+            int responseCode = connection.getResponseCode();
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                byte[] content = connection.getInputStream().readAllBytes();
+                Map<String, Object> listPeers = bencode.decode(content,Type.DICTIONARY);
 
-            System.out.println("Data from announce URL :: " + dataFromAnnounceUrl.getBody());
-
-            decodedData = bencode.decode(dataFromAnnounceUrl.getBody().getBytes(), Type.DICTIONARY);
-
-            System.out.println(decodedData);
-
-        } else {
-            System.out.println("Failed with http status code :: " + dataFromAnnounceUrl.getStatusCode());
+                System.out.println("List ofe peers :: "+listPeers);
+                for (Map<String, Object> peer : (Iterable<Map<String, Object>>) listPeers.get("peers")) {
+                    String ip = (String) peer.get("ip");
+                    int p = (int) peer.get("port");
+                    SockAddr sockAddr = new SockAddr(ip, p,true);
+                    dictSockAddr.put(sockAddr.hashCode(), sockAddr);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.out.println("HTTP scraping failed: " + e.getMessage());
         }
 
     }
 
-    public void getDataFromUdp(String trackerUrl, Map<String, Object> decodedData) throws UnsupportedEncodingException, NoSuchAlgorithmException {
-        System.out.println("Doing UDP call");
-
+    public void getDataFromUdp(String trackerUrl, byte[] infoHash,String peerId) throws UnsupportedEncodingException, NoSuchAlgorithmException {
 
         int trackerPort = getPortFromUrl(trackerUrl);
-
-        // Generate a random peer ID
-        String peerId = generatePeerId();
-
-        String infoHash = createInfoHash(decodedData);
-
-        // Prepare the request data
-        byte[] requestData = prepareRequest(infoHash, peerId);
 
         try {
             // Create a UDP socket
             DatagramSocket socket = new DatagramSocket();
 
+            String hostName = extractDomain(trackerUrl);
             // Send the request
-            InetAddress trackerAddress = InetAddress.getByName(trackerUrl.substring(6)); // Remove "udp://" prefix
-            DatagramPacket requestPacket = new DatagramPacket(requestData, requestData.length, trackerAddress, trackerPort);
-//            System.out.println(requestPacket);
-            socket.send(requestPacket);
+            InetAddress trackerAddress = InetAddress.getByName(hostName);
+            socket.setSoTimeout(4000);
 
-            // Receive the response
-            byte[] responseData = new byte[1024]; // Adjust size as needed
-            DatagramPacket responsePacket = new DatagramPacket(responseData, responseData.length);
-            socket.receive(responsePacket);
+            if (trackerAddress.isSiteLocalAddress()) {
+                return;
+            }
 
-            // Process the response
-            String response = new String(responsePacket.getData(), 0, responsePacket.getLength());
-            System.out.println("Tracker Response: " + response);
+            UdpTrackerConnection trackerConnectionInput = new UdpTrackerConnection();
+            byte[] responseUdpTrackerConnection = sendMessageUdpTrackerConnection(trackerAddress, trackerPort, socket, trackerConnectionInput);
 
-            // Close the socket
-            socket.close();
+            if (responseUdpTrackerConnection == null) {
+                throw new IOException("No response for UdpTrackerConnection");
+            }
+
+            UdpTrackerConnection trackerConnectionOutput = new UdpTrackerConnection();
+            trackerConnectionOutput.fromBytes(responseUdpTrackerConnection);
+
+
+            UdpTrackerAnnounce trackerAnnounceInput = new UdpTrackerAnnounce(infoHash, trackerConnectionOutput.getConnId(), peerId);
+            System.out.println("trackerAnnounceInput :: " +trackerAnnounceInput);
+            byte[] responseUdpTrackerAnnounce = sendMessageUdpTrackerConnection(trackerAddress, trackerPort, socket, trackerAnnounceInput);
+
+            System.out.println("responseUdpTrackerAnnounce :: "+responseUdpTrackerAnnounce);
+            if (responseUdpTrackerAnnounce == null) {
+                throw new IOException("No response for UdpTrackerAnnounce");
+            }
+
+            UdpTrackerAnnounceOutput trackerAnnounceOutput = new UdpTrackerAnnounceOutput();
+            trackerAnnounceOutput.fromBytes(responseUdpTrackerAnnounce);
+
+
+            System.out.println(trackerAnnounceOutput.getListSockAddr());
+
+            for (SockAddr sockAddr : trackerAnnounceOutput.getListSockAddr()) {
+                if (!dictSockAddr.containsKey(sockAddr.hashCode())) {
+                    dictSockAddr.put(sockAddr.hashCode(), sockAddr);
+                }
+            }
+
+            System.out.println("Got " + dictSockAddr.size() + " peers");
+            System.out.println("dictSockAddr :: "+dictSockAddr);
+
+
         } catch (SocketException e) {
             throw new RuntimeException(e);
         } catch (UnknownHostException e) {
@@ -141,42 +195,21 @@ public class AnnounceAsPeerAndGetPeersList {
         }
     }
 
-    private byte[] prepareRequest(String infoHash, String peerId) {
-        ByteBuffer buffer = ByteBuffer.allocate(98);
-        buffer.putLong(0L); // Connection ID (0 for initial connection)
-        buffer.putInt(0); // Action (0 for "connect")
-        buffer.putInt((int) System.currentTimeMillis()); // Transaction ID
-
-        // Info Hash
-        try {
-            byte[] infoHashBytes = hexStringToByteArray(infoHash);
-            buffer.put(infoHashBytes);
-        } catch (IllegalArgumentException e) {
-            e.printStackTrace();
-        }
-
-        // Peer ID
-        buffer.put(peerId.getBytes());
-
-        return buffer.array();
-    }
-
-    private String generatePeerId() {
-        // A simple method to generate a random peer ID
-        // You can replace this with a more sophisticated approach if needed
-        return "PEERID1234567890";
-    }
-
-    private byte[] hexStringToByteArray(String s) {
-        int len = s.length();
-        byte[] data = new byte[len / 2];
-        for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-                    + Character.digit(s.charAt(i + 1), 16));
-        }
-        return data;
-    }
-
+//    public void tryPeerConnect() {
+//        System.out.println("Trying to connect to " + dictSockAddr.size() + " peer(s)");
+//
+//        for (SockAddr sockAddr : dictSockAddr.values()) {
+//            if (connectedPeers.size() >= MAX_PEERS_CONNECTED) {
+//                break;
+//            }
+//
+//            Peer newPeer = new Peer(torrent.getNumberOfPieces(), sockAddr.getIp(), sockAddr.getPort());
+//            if (newPeer.connect()) {
+//                System.out.println("Connected to " + connectedPeers.size() + "/" + MAX_PEERS_CONNECTED + " peers");
+//                connectedPeers.put(newPeer.hashCode(), newPeer);
+//            }
+//        }
+//    }
     public int getPortFromUrl(String trackerUrl){
 
         String numberStr = null;
@@ -191,9 +224,9 @@ public class AnnounceAsPeerAndGetPeersList {
         return Integer.parseInt(numberStr);
     }
 
-    public String createInfoHash(Map<String, Object> decodedData) throws UnsupportedEncodingException, NoSuchAlgorithmException {
+    public String createInfoHash(DecodedData decodedData) throws UnsupportedEncodingException, NoSuchAlgorithmException {
 
-        byte[] data = decodedData.get("info").toString().getBytes("UTF-8");
+        byte[] data = decodedData.getInfo().toString().getBytes("UTF-8");
         MessageDigest digest = MessageDigest.getInstance("SHA-1");
         digest.update(data);
 
@@ -213,5 +246,122 @@ public class AnnounceAsPeerAndGetPeersList {
         }
 
         return hexString.toString();
+    }
+
+    public String extractDomain(String url) {
+        // Regular expression pattern to match domain
+        Pattern pattern = Pattern.compile("udp://([^:/]+)");
+        Matcher matcher = pattern.matcher(url);
+        if (matcher.find()) {
+            return matcher.group(1);
+        } else {
+            return null;
+        }
+    }
+
+    public String generatePeerId() {
+        String seed = String.valueOf(System.currentTimeMillis() / 1000L);
+        byte[] sha1Digest = sha1(seed.getBytes(StandardCharsets.UTF_8));
+        return bytesToHex(sha1Digest);
+    }
+
+    public static byte[] sha1(byte[] data) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            return digest.digest(data);
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public static String bytesToHex(byte[] bytes) {
+        StringBuilder hexString = new StringBuilder();
+        for (byte b : bytes) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) {
+                hexString.append('0');
+            }
+            hexString.append(hex);
+        }
+        return hexString.toString();
+    }
+
+    public byte[] sendMessageUdpTrackerConnection(InetAddress ip, int port, DatagramSocket sock, UdpTrackerConnection trackerMessage) throws IOException {
+        byte[] message = trackerMessage.toBytes();
+        int transId = trackerMessage.getTransId();
+        int action = trackerMessage.getAction();
+        int size = message.length;
+
+        DatagramPacket sendPacket = new DatagramPacket(message, size, ip, port);
+        sock.send(sendPacket);
+
+        byte[] response = readFromSocket(sock);
+
+        System.out.println("response size ::"+response.length);
+        if (response.length < size) {
+            System.out.println("Did not get full message.");
+        }
+
+        ByteBuffer responseBuffer = ByteBuffer.wrap(response);
+
+        if (action != responseBuffer.getInt(0) || transId != responseBuffer.getInt(4)) {
+            System.out.println("Transaction or Action ID did not match");
+        }
+
+        return response;
+    }
+
+    public byte[] sendMessageUdpTrackerConnection(InetAddress ip, int port, DatagramSocket sock, UdpTrackerAnnounce trackerMessage) throws IOException {
+        byte[] message = trackerMessage.toBytes();
+        int transId = trackerMessage.getTransId();
+        int action = trackerMessage.getAction();
+        int size = message.length;
+
+        DatagramPacket sendPacket = new DatagramPacket(message, size, ip, port);
+        sock.send(sendPacket);
+
+        byte[] response = readFromSocket(sock);
+
+        if (response.length < size) {
+            System.out.println("Did not get full message.");
+        }
+
+        ByteBuffer responseBuffer = ByteBuffer.wrap(response);
+
+        if (action != responseBuffer.getInt(0) || transId != responseBuffer.getInt(4)) {
+            System.out.println("Transaction or Action ID did not match");
+        }
+
+        return response;
+    }
+
+    public byte[] readFromSocket(DatagramSocket socket) throws IOException {
+        byte[] data = new byte[0];
+
+        while (true) {
+            byte[] buffer = new byte[4096];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            try {
+                socket.receive(packet);
+                byte[] receivedData = packet.getData();
+                if (receivedData.length <= 0) {
+                    break;
+                }
+                byte[] newData = new byte[data.length + receivedData.length];
+                System.arraycopy(data, 0, newData, 0, data.length);
+                System.arraycopy(receivedData, 0, newData, data.length, receivedData.length);
+                data = newData;
+            } catch (SocketTimeoutException e) {
+                // Socket timeout occurred, handle as needed
+                break;
+            } catch (IOException e) {
+                // Handle other IOExceptions
+                e.printStackTrace();
+                break;
+            }
+        }
+
+        return data;
     }
 }

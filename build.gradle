@@ -15,10 +15,20 @@ repositories {
 	mavenCentral()
 }
 
+configurations {
+
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 	implementation 'com.dampcake:bencode:1.4.1'
+	annotationProcessor 'org.projectlombok:lombok'
+	implementation 'com.google.code.gson:gson:2.10.1'
+
 }
 
 tasks.named('test') {

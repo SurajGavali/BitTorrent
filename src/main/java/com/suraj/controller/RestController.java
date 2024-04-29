@@ -2,7 +2,9 @@ package com.suraj.controller;
 
 import com.dampcake.bencode.Bencode;
 import com.dampcake.bencode.Type;
+import com.google.gson.Gson;
 import com.suraj.AnnounceAsPeerAndGetPeersList;
+import com.suraj.model.DecodedData;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -17,15 +19,24 @@ public class RestController {
 
     Bencode bencode = new Bencode();
     StringBuilder decodedDataString = new StringBuilder();
-    Map<String, Object> decodedData;
     @Autowired
     AnnounceAsPeerAndGetPeersList announceAsPeerAndGetPeersList;
+    @Autowired Gson gson;
     @PostMapping(value = "/api/surajtorrent")
-    public ResponseEntity<Map<String,Object>> getDataFromTorrentFile(@RequestParam("file") MultipartFile file) throws IOException {
+    public ResponseEntity<DecodedData> getDataFromTorrentFile(@RequestParam("file") MultipartFile file) throws IOException {
 
+        DecodedData decodedData = new DecodedData();
         try{
             byte[] fileBytes = file.getBytes();
-            decodedData = bencode.decode(fileBytes,Type.DICTIONARY);
+
+            Map<String, Object> decodedDataDictionary = bencode.decode(fileBytes,Type.DICTIONARY);
+            System.out.println(decodedDataDictionary);
+
+
+
+            decodedData = gson.fromJson(gson.toJsonTree(decodedDataDictionary),DecodedData.class);
+            System.out.println(gson.toJson(decodedData));
+
 
             announceAsPeerAndGetPeersList.getPeers(decodedData);
         }catch(Exception e){
